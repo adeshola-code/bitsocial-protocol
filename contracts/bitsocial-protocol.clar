@@ -333,3 +333,132 @@
     (ok true)
   )
 )
+
+;; CONTENT CREATION AND MANAGEMENT
+
+;; Publish content to the decentralized network
+(define-public (create-content (content-text (string-utf8 1024)) (content-type (string-ascii 5)) (media-url (optional (string-ascii 256))) (community-id (optional uint)))
+  (let
+    (
+      (content-id (var-get next-content-id))
+      (author-id (unwrap! (map-get? principal-to-profile tx-sender) ERR_PROFILE_NOT_FOUND))
+      (author-profile (unwrap! (map-get? user-profiles { profile-id: author-id }) ERR_PROFILE_NOT_FOUND))
+      (validated-media-url (if (is-valid-optional-url media-url) media-url none))
+      (validated-community-id (match community-id
+        some-id (if (is-some (map-get? communities { community-id: some-id })) community-id none)
+        none
+      ))
+    )
+    (asserts! (not (var-get protocol-paused)) ERR_UNAUTHORIZED)
+    (asserts! (<= (len content-text) MAX_CONTENT_LENGTH) ERR_INVALID_PARAMS)
+    (asserts! (is-valid-content-type content-type) ERR_INVALID_PARAMS)
+    (asserts! (is-valid-optional-url media-url) ERR_INVALID_URL)
+    
+    ;; Validate community association
+    (match community-id
+      some-community-id (asserts! (is-some (map-get? communities { community-id: some-community-id })) ERR_NOT_FOUND)
+      true
+    )
+    
+    ;; Store content immutably
+    (map-set content-posts
+      { content-id: content-id }
+      {
+        author-id: author-id,
+        content-text: content-text,
+        content-type: content-type,
+        media-url: validated-media-url,
+        tip-count: u0,
+        total-tips: u0,
+        engagement-score: u0,
+        created-at: stacks-block-height,
+        community-id: validated-community-id
+      }
+    )
+    
+    ;; Update author statistics
+    (map-set user-profiles
+      { profile-id: author-id }
+      (merge author-profile { content-count: (+ (get content-count author-profile) u1) })
+    )
+    
+    ;; Track engagement metrics
+    (update-engagement author-id u0 u0 u1)
+    
+    ;; Increment global counter
+    (var-set next-content-id (+ content-id u1))
+    
+    (ok content-id)
+  )
+)
+
+;; MONETIZATION AND VALUE EXCHANGE
+
+;; Send monetary appreciation for quality content
+(define-public (tip-content (content-id uint) (amount uint) (message (optional (string-utf8 256))))
+  (let
+    (
+      (content (unwrap! (map-get? content-posts { content-id: content-id }) ERR_CONTENT_NOT_FOUND))
+      (tipper-id (unwrap! (map-get? principal-to-profile tx-sender) ERR_PROFILE_NOT_FOUND))
+      (author-id (get author-id content))
+      (author-profile (unwrap! (map-get? user-profiles { profile-id: author-id }) ERR_PROFILE_NOT_FOUND))
+      (tipper-profile (unwrap! (map-get? user-profiles { profile-id: tipper-id }) ERR_PROFILE_NOT_FOUND))
+      (protocol-fee (calculate-protocol-fee amount))
+      (author-amount (- amount protocol-fee))
+      (validated-message (if (is-valid-message message) message none))
+      (validated-content-id (if (is-some (map-get? content-posts { content-id: content-id })) content-id u0))
+    )
+    (asserts! (not (var-get protocol-paused)) ERR_UNAUTHORIZED)
+    (asserts! (>= amount MIN_TIP_AMOUNT) ERR_INVALID_AMOUNT)
+    (asserts! (not (is-eq tipper-id author-id)) ERR_SELF_TIP)
+    (asserts! (> validated-content-id u0) ERR_CONTENT_NOT_FOUND)
+    (asserts! (is-none (map-get? content-tips { content-id: validated-content-id, tipper: tx-sender })) ERR_ALREADY_TIPPED)
+    (asserts! (is-valid-message message) ERR_INVALID_MESSAGE)
+    
+    ;; Execute value transfer to content creator
+    (try! (stx-transfer? author-amount tx-sender (get owner author-profile)))
+    
+    ;; Collect protocol sustainability fee
+    (try! (stx-transfer? protocol-fee tx-sender (var-get protocol-fee-recipient)))
+    
+    ;; Record transaction immutably
+    (map-set content-tips
+      { content-id: validated-content-id, tipper: tx-sender }
+      {
+        amount: amount,
+        message: validated-message,
+        tipped-at: stacks-block-height
+      }
+    )
+    
+    ;; Update content engagement metrics
+    (map-set content-posts
+      { content-id: validated-content-id }
+      (merge content 
+        { 
+          tip-count: (+ (get tip-count content) u1),
+          total-tips: (+ (get total-tips content) amount),
+          engagement-score: (+ (get engagement-score content) u1)
+        }
+      )
+    )
+    
+    ;; Update user financial metrics
+    (map-set user-profiles
+      { profile-id: author-id }
+      (merge author-profile { total-tips-received: (+ (get total-tips-received author-profile) author-amount) })
+    )
+    
+    (map-set user-profiles
+      { profile-id: tipper-id }
+      (merge tipper-profile { total-tips-sent: (+ (get total-tips-sent tipper-profile) amount) })
+    )
+    
+    ;; Update reputation and engagement tracking
+    (update-engagement author-id amount u0 u0)
+    (update-engagement tipper-id u0 amount u0)
+    (update-reputation author-id (/ amount u1000))
+    
+    (ok true)
+  )
+)
