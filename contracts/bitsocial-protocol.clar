@@ -212,3 +212,124 @@
     true
   )
 )
+
+(define-private (update-engagement (profile-id uint) (tips-received uint) (tips-sent uint) (content-posted uint))
+  (let 
+    (
+      (period (get-current-period))
+      (current-engagement (default-to 
+        { tips-received: u0, tips-sent: u0, content-posted: u0, engagement-score: u0 }
+        (map-get? user-engagement { profile-id: profile-id, period: period })
+      ))
+    )
+    (map-set user-engagement
+      { profile-id: profile-id, period: period }
+      {
+        tips-received: (+ (get tips-received current-engagement) tips-received),
+        tips-sent: (+ (get tips-sent current-engagement) tips-sent),
+        content-posted: (+ (get content-posted current-engagement) content-posted),
+        engagement-score: (+ (get engagement-score current-engagement) tips-received tips-sent content-posted)
+      }
+    )
+  )
+)
+
+;; IDENTITY MANAGEMENT FUNCTIONS
+
+;; Create a sovereign digital identity on the blockchain
+(define-public (create-profile (handle (string-ascii 32)) (bio (string-utf8 256)) (avatar-url (optional (string-ascii 256))))
+  (let
+    (
+      (profile-id (var-get next-profile-id))
+      (caller tx-sender)
+      (validated-avatar-url (if (is-valid-optional-url avatar-url) avatar-url none))
+    )
+    (asserts! (not (var-get protocol-paused)) ERR_UNAUTHORIZED)
+    (asserts! (is-none (map-get? principal-to-profile caller)) ERR_ALREADY_EXISTS)
+    (asserts! (is-valid-handle handle) ERR_INVALID_PARAMS)
+    (asserts! (<= (len bio) MAX_BIO_LENGTH) ERR_INVALID_PARAMS)
+    (asserts! (is-valid-optional-url avatar-url) ERR_INVALID_URL)
+    
+    ;; Initialize user profile
+    (map-set user-profiles
+      { profile-id: profile-id }
+      {
+        owner: caller,
+        handle: handle,
+        bio: bio,
+        avatar-url: validated-avatar-url,
+        reputation-score: INITIAL_REPUTATION,
+        total-tips-received: u0,
+        total-tips-sent: u0,
+        content-count: u0,
+        follower-count: u0,
+        following-count: u0,
+        created-at: stacks-block-height,
+        verified: false
+      }
+    )
+    
+    ;; Establish identity mappings
+    (map-set handle-to-profile handle profile-id)
+    (map-set principal-to-profile caller profile-id)
+    
+    ;; Update global counter
+    (var-set next-profile-id (+ profile-id u1))
+    
+    (ok profile-id)
+  )
+)
+
+;; Update existing profile information
+(define-public (update-profile (bio (string-utf8 256)) (avatar-url (optional (string-ascii 256))))
+  (let
+    (
+      (profile-id (unwrap! (map-get? principal-to-profile tx-sender) ERR_PROFILE_NOT_FOUND))
+      (profile (unwrap! (map-get? user-profiles { profile-id: profile-id }) ERR_PROFILE_NOT_FOUND))
+      (validated-avatar-url (if (is-valid-optional-url avatar-url) avatar-url none))
+    )
+    (asserts! (is-eq (get owner profile) tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (<= (len bio) MAX_BIO_LENGTH) ERR_INVALID_PARAMS)
+    (asserts! (is-valid-optional-url avatar-url) ERR_INVALID_URL)
+    
+    (map-set user-profiles
+      { profile-id: profile-id }
+      (merge profile { bio: bio, avatar-url: validated-avatar-url })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Establish social connections between users
+(define-public (follow-user (target-handle (string-ascii 32)))
+  (let
+    (
+      (follower-id (unwrap! (map-get? principal-to-profile tx-sender) ERR_PROFILE_NOT_FOUND))
+      (following-id (unwrap! (map-get? handle-to-profile target-handle) ERR_PROFILE_NOT_FOUND))
+      (follower-profile (unwrap! (map-get? user-profiles { profile-id: follower-id }) ERR_PROFILE_NOT_FOUND))
+      (following-profile (unwrap! (map-get? user-profiles { profile-id: following-id }) ERR_PROFILE_NOT_FOUND))
+    )
+    (asserts! (not (is-eq follower-id following-id)) ERR_INVALID_PARAMS)
+    (asserts! (is-none (map-get? social-connections { follower-id: follower-id, following-id: following-id })) ERR_ALREADY_EXISTS)
+    
+    ;; Create bidirectional connection
+    (map-set social-connections
+      { follower-id: follower-id, following-id: following-id }
+      { connected-at: stacks-block-height }
+    )
+    
+    ;; Update social metrics
+    (map-set user-profiles
+      { profile-id: follower-id }
+      (merge follower-profile { following-count: (+ (get following-count follower-profile) u1) })
+    )
+    
+    (map-set user-profiles
+      { profile-id: following-id }
+      (merge following-profile { follower-count: (+ (get follower-count following-profile) u1) })
+    )
+    
+    (ok true)
+  )
+)
