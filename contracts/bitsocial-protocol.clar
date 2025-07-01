@@ -462,3 +462,111 @@
     (ok true)
   )
 )
+
+;; COMMUNITY GOVERNANCE AND TOKENIZATION
+
+;; Launch a new tokenized community with governance rights
+(define-public (create-community (name (string-ascii 64)) (description (string-utf8 256)) (token-symbol (string-ascii 8)) (initial-supply uint))
+  (let
+    (
+      (community-id (var-get next-community-id))
+      (creator-id (unwrap! (map-get? principal-to-profile tx-sender) ERR_PROFILE_NOT_FOUND))
+    )
+    (asserts! (not (var-get protocol-paused)) ERR_UNAUTHORIZED)
+    (asserts! (> initial-supply u0) ERR_INVALID_PARAMS)
+    (asserts! (> (len name) u0) ERR_INVALID_PARAMS)
+    (asserts! (<= (len name) u64) ERR_INVALID_PARAMS)
+    (asserts! (<= (len description) u256) ERR_INVALID_PARAMS)
+    (asserts! (> (len token-symbol) u0) ERR_INVALID_PARAMS)
+    (asserts! (<= (len token-symbol) u8) ERR_INVALID_PARAMS)
+    
+    ;; Initialize community governance structure
+    (map-set communities
+      { community-id: community-id }
+      {
+        name: name,
+        description: description,
+        creator-id: creator-id,
+        token-symbol: token-symbol,
+        total-supply: initial-supply,
+        member-count: u1,
+        created-at: stacks-block-height,
+        governance-threshold: (/ initial-supply u2)
+      }
+    )
+    
+    ;; Grant founding member full governance rights
+    (map-set community-members
+      { community-id: community-id, member-id: creator-id }
+      {
+        token-balance: initial-supply,
+        joined-at: stacks-block-height,
+        is-moderator: true
+      }
+    )
+    
+    ;; Update global community counter
+    (var-set next-community-id (+ community-id u1))
+    
+    (ok community-id)
+  )
+)
+
+;; Join an existing community as a member
+(define-public (join-community (community-id uint))
+  (let
+    (
+      (member-id (unwrap! (map-get? principal-to-profile tx-sender) ERR_PROFILE_NOT_FOUND))
+      (community (unwrap! (map-get? communities { community-id: community-id }) ERR_NOT_FOUND))
+      (validated-community-id (if (is-some (map-get? communities { community-id: community-id })) community-id u0))
+    )
+    (asserts! (> validated-community-id u0) ERR_NOT_FOUND)
+    (asserts! (is-none (map-get? community-members { community-id: validated-community-id, member-id: member-id })) ERR_ALREADY_EXISTS)
+    
+    ;; Register new community member
+    (map-set community-members
+      { community-id: validated-community-id, member-id: member-id }
+      {
+        token-balance: u0,
+        joined-at: stacks-block-height,
+        is-moderator: false
+      }
+    )
+    
+    ;; Update community membership statistics
+    (map-set communities
+      { community-id: validated-community-id }
+      (merge community { member-count: (+ (get member-count community) u1) })
+    )
+    
+    (ok true)
+  )
+)
+
+;; DATA QUERY FUNCTIONS
+
+(define-read-only (get-profile-by-id (profile-id uint))
+  (map-get? user-profiles { profile-id: profile-id })
+)
+
+(define-read-only (get-profile-by-handle (handle (string-ascii 32)))
+  (match (map-get? handle-to-profile handle)
+    some-id (map-get? user-profiles { profile-id: some-id })
+    none
+  )
+)
+
+(define-read-only (get-profile-by-principal (user principal))
+  (match (map-get? principal-to-profile user)
+    some-id (map-get? user-profiles { profile-id: some-id })
+    none
+  )
+)
+
+(define-read-only (get-content (content-id uint))
+  (map-get? content-posts { content-id: content-id })
+)
+
+(define-read-only (get-tip (content-id uint) (tipper principal))
+  (map-get? content-tips { content-id: content-id, tipper: tipper })
+)
